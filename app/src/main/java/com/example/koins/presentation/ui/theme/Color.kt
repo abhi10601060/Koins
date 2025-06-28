@@ -1,4 +1,4 @@
-package com.example.koins.ui.theme
+package com.example.koins.presentation.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
