@@ -72,6 +72,7 @@ dependencies {
 
     //ViewModel
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:$2.9.1")
 
     //Coil
     implementation(libs.coil.compose)

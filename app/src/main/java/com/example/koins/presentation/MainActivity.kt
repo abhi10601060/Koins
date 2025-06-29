@@ -11,6 +11,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.rememberNavController
+import com.example.koins.presentation.navigation.MainNavGraph
+import com.example.koins.presentation.navigation.MainNavigation
 import com.example.koins.presentation.ui.theme.KoinsTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -21,14 +25,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             KoinsTheme {
-                Scaffold(modifier = Modifier.Companion.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.Companion.padding(innerPadding)
-                    )
-                }
+                App()
             }
         }
+    }
+}
+
+@Composable
+fun App() {
+    val navController = rememberNavController()
+    NavHost(navController, startDestination = MainNavigation){
+        MainNavGraph(navController)
     }
 }
 
