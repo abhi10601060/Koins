@@ -7,10 +7,11 @@ import androidx.navigation.navigation
 import androidx.navigation.toRoute
 import com.example.koins.presentation.coin_details.CoinDetailsScreen
 import com.example.koins.presentation.coin_list.CoinListScreen
+import com.example.koins.presentation.ssl_pin.component.BookShopScreen
 import kotlinx.serialization.Serializable
 
 fun NavGraphBuilder.MainNavGraph(navController: NavController){
-    navigation<MainNavigation>(startDestination = CoinListScreen) {
+    navigation<MainNavigation>(startDestination = BookShopScreenRoute) {
         composable<CoinListScreen> {
             CoinListScreen(navController)
         }
@@ -18,6 +19,10 @@ fun NavGraphBuilder.MainNavGraph(navController: NavController){
         composable<CoinDetailsScreenRoute> { backStack ->
             val route = backStack.toRoute<CoinDetailsScreenRoute>()
             CoinDetailsScreen(navController = navController, coinId = route.id)
+        }
+
+        composable<BookShopScreenRoute> {
+            BookShopScreen()
         }
     }
 }
@@ -32,3 +37,6 @@ object CoinListScreen
 data class CoinDetailsScreenRoute(
     val id : String
 )
+
+@Serializable
+object BookShopScreenRoute

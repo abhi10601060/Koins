@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+<!--    <domain-config>-->
+<!--        <domain includeSubdomains="false">192.168.1.8</domain>-->
+<!--        <pin-set>-->
+<!--            <pin digest="SHA-256">iRbXQIm6KB8qGPLZtAEfOuAqwbgV50U38dnkxlq+kLY=</pin>-->
+<!--        </pin-set>-->
+<!--    </domain-config>-->
+    
+        <domain-config>
+            <domain includeSubdomains="true" domain="192.168.1.8">192.168.1.8</domain>
+            <pin-set>
+                <pin digest="SHA-256">iRbXQIm6KB8qGPLZtAEfOuAqwbgV50U38dnkxlq+kLY=</pin>
+            </pin-set>
+            <trust-anchors>
+                <!-- Trust preinstalled CAs, good practice to keep this -->
+                <certificates src="system" />
+                <!-- Trust your local server's certificate -->
+                <certificates src="@raw/cert"/>
+            </trust-anchors>
+        </domain-config>
+
+        <!-- Optional: Default configuration for other domains -->
+<!--        <base-config cleartextTrafficPermitted="false">-->
+<!--            <trust-anchors>-->
+<!--                <certificates src="system" />-->
+<!--            </trust-anchors>-->
+<!--        </base-config>-->
+
+</network-security-config>
