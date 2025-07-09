@@ -11,7 +11,7 @@ import com.example.koins.presentation.ssl_pin.component.BookShopScreen
 import kotlinx.serialization.Serializable
 
 fun NavGraphBuilder.MainNavGraph(navController: NavController){
-    navigation<MainNavigation>(startDestination = BookShopScreenRoute) {
+    navigation<MainNavigation>(startDestination = CoinListScreen) {
         composable<CoinListScreen> {
             CoinListScreen(navController)
         }

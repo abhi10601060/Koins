@@ -19,3 +19,13 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+#These are for DTO's mostly used in data layer so json parameters to be mapped
+-keep class com.example.koins.data.remote.dto.* {*;}
+-keep @kotlinx.serialization.Serializable class * { *; }
+
+#To remove the logs from the release build
+-assumenosideeffects class android.util.Log {
+      public static int d(...);
+      public static int v(...);
+ }
