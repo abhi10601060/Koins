@@ -1,11 +1,13 @@
 pipeline{
-    node{
+    agent{
         label "android-agent"
     }
 
     stages{
         stage("start") {
-            echo "Hi from Jenkinsfile"
+            steps{
+                echo "Hi from Jenkinsfile"
+            }
         }
     }
 }
