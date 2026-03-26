@@ -1,0 +1,99 @@
+image: eclipse-temurin:17-jdk
+
+variables:
+  ANDROID_COMPILE_SDK: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  ANDROID_SDK_TOOLS: "9477386"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+
+stages:
+  - build
+
+before_script:
+  # Install Android SDK
+  - apt-get --quiet update --yes
+  - apt-get --quiet install --yes wget unzip
+
+  # Setup path as ANDROID_SDK_ROOT for SDK
+  - export ANDROID_SDK_ROOT="${PWD}/android-sdk-linux"
+
+  # Create a new directory at specified location
+  - install -d $ANDROID_SDK_ROOT
+
+  # Download Command line tools into a new directory
+  - wget --no-verbose --output-document=$ANDROID_SDK_ROOT/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_SDK_TOOLS}_latest.zip
+
+  # Unzip Command line tools
+  - unzip -q -d "$ANDROID_SDK_ROOT/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools.zip"
+  - mv -T "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/tools"
+
+  # Export environment variables
+  - export PATH=$PATH:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/cmdline-tools/tools/bin
+
+  # Accept licenses before installing components
+  - yes | sdkmanager --licenses || true
+  - sdkmanager "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}"
+
+  # Set executable permission for gradlew
+  - chmod +x ./gradlew
+
+# Cache configuration
+cache:
+  key: ${CI_PROJECT_ID}
+  paths:
+    - .gradle/
+    - gradle/
+    - build/
+    - app/build/
+
+# Build Debug APK
+buildDebug:
+  stage: build
+  script:
+    - ./gradlew assembleDebug
+  artifacts:
+    paths:
+      - app/build/outputs/apk/debug/app-debug.apk
+    expire_in: 1 week
+  only:
+    - branches
+
+# Build Release APK
+buildRelease:
+  stage: build
+  script:
+    - ./gradlew assembleRelease
+  artifacts:
+    paths:
+      - app/build/outputs/apk/release/app-release.apk
+    expire_in: 1 month
+  only:
+    - main
+    - master
+    - tags
+
+# Optional: Run lint checks
+lintDebug:
+  stage: build
+  script:
+    - ./gradlew lintDebug
+  artifacts:
+    paths:
+      - app/build/reports/lint-results-debug.html
+    expire_in: 1 week
+  only:
+    - branches
+  allow_failure: true
+
+# Optional: Run unit tests
+testDebug:
+  stage: build
+  script:
+    - ./gradlew testDebugUnitTest
+  artifacts:
+    paths:
+      - app/build/reports/tests/testDebugUnitTest/
+    expire_in: 1 week
+  only:
+    - branches
+  allow_failure: true
