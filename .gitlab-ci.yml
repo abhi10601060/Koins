@@ -5,6 +5,7 @@ variables:
   ANDROID_BUILD_TOOLS: "35.0.0"
   ANDROID_SDK_TOOLS: "9477386"
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+  SECURE_FILE_ID: "koins-key"
 
 stages:
   - build
@@ -58,12 +59,25 @@ buildDebug:
   only:
     - branches
 
+# Download KeyStore
+download_keystore:
+  stage: build
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  script:
+    - glab auth login --job-token $CI_JOB_TOKEN --hostname $CI_SERVER_FQDN --api-protocol $CI_SERVER_PROTOCOL
+    - glab -R $CI_PROJECT_PATH securefile download $SECURE_FILE_ID --path=".secure_files/$SECURE_FILE_ID.jks"
+  artifacts:
+    paths:
+      - .secure_files
+
 # Build Release APK
 buildRelease:
   stage: build
+  needs:
+    - download_keystore
   script:
     - ./gradlew assembleRelease
-    - Pandroid.injected.signing.store.file=".secure_files/koins-key.jks"
+    - Pandroid.injected.signing.store.file="$CI_PROJECT_DIR/.secure_files/koins-key.jks"
     - Pandroid.injected.signing.store.password=$KOINS_KEYSTORE_PASS
     - Pandroid.injected.signing.key.alias=$KOINS_KEY_ALIAS
     - Pandroid.injected.signing.key.password=$KOINS_KEY_ALIAS
