@@ -39,7 +39,7 @@ before_script:
 
 # Cache configuration
 cache:
-  key: ${CI_PROJECT_ID}
+  key: ci-test
   paths:
     - .gradle/
     - gradle/
