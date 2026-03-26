@@ -6,6 +6,7 @@ variables:
   ANDROID_SDK_TOOLS: "9477386"
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
   SECURE_FILE_ID: "koins-key"
+  
 
 stages:
   - build
@@ -62,13 +63,13 @@ buildDebug:
 # Download KeyStore
 download_keystore:
   stage: build
-  image: registry.gitlab.com/gitlab-org/cli:latest
+  variables:
+    SECURE_FILES_DOWNLOAD_PATH: './.secure_file/'
   script:
-    - glab auth login --job-token $CI_JOB_TOKEN --hostname $CI_SERVER_FQDN --api-protocol $CI_SERVER_PROTOCOL
-    - glab -R $CI_PROJECT_PATH securefile download $SECURE_FILE_ID --path=".secure_files/$SECURE_FILE_ID.jks"
+    - curl --silent "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash
   artifacts:
     paths:
-      - .secure_files
+      - ./.secure_files
 
 # Build Release APK
 buildRelease:
