@@ -66,6 +66,10 @@ buildRelease:
   artifacts:
     paths:
       - app/build/outputs/apk/release/app-release.apk
+      - Pandroid.injected.signing.store.file=".secure_files/koins-key.jks"
+      - Pandroid.injected.signing.store.password=$KOINS_KEYSTORE_PASS
+      - Pandroid.injected.signing.key.alias=$KOINS_KEY_ALIAS
+      - Pandroid.injected.signing.key.password=$KOINS_KEY_ALIAS
     expire_in: 1 month
   only:
     - main
