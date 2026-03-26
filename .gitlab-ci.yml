@@ -78,7 +78,7 @@ buildRelease:
     - download_keystore
   script:
     - ./gradlew assembleRelease
-    - Pandroid.injected.signing.store.file="$CI_PROJECT_DIR/.secure_files/koins-key.jks"
+    - Pandroid.injected.signing.store.file="$CI_PROJECT_DIR/.secure_files/koins-key"
     - Pandroid.injected.signing.store.password=$KOINS_KEYSTORE_PASS
     - Pandroid.injected.signing.key.alias=$KOINS_KEY_ALIAS
     - Pandroid.injected.signing.key.password=$KOINS_KEY_ALIAS
