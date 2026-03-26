@@ -6,7 +6,7 @@ variables:
   ANDROID_SDK_TOOLS: "9477386"
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
   SECURE_FILE_ID: "koins-key"
-  
+
 
 stages:
   - build
