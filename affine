@@ -1,0 +1,80 @@
+public (Mat warpedImage, AlignmentResult result) Align(Mat capturedImage)
+{
+    var matches = FindOrbMatches(capturedImage);
+
+    if (matches.Count < 20)
+    {
+        return (null,
+            new AlignmentResult
+            {
+                Success = false,
+                InlierCount = 0,
+                FailureReason = $"Only {matches.Count} ORB matches found."
+            });
+    }
+
+    Point2f[] masterPts = matches.Select(x => x.Item1).ToArray();
+    Point2f[] capturedPts = matches.Select(x => x.Item2).ToArray();
+
+    using var srcMat = InputArray.Create(capturedPts);
+    using var dstMat = InputArray.Create(masterPts);
+    using Mat inlierMask = new Mat();
+
+    // =========================================================================
+    // SWITCHED FROM HOMOGRAPHY TO AFFINE PARTIAL 2D (No more 3D perspective warp!)
+    // =========================================================================
+    using Mat M = Cv2.EstimateAffinePartial2D(
+        srcMat, 
+        dstMat, 
+        inlierMask, 
+        RansacModes.RANSAC, 
+        3.0); // 3.0 pixel reprojection threshold
+
+    if (M == null || M.Empty())
+    {
+        return (null,
+            new AlignmentResult
+            {
+                Success = false,
+                InlierCount = 0,
+                FailureReason = "Affine transformation computation failed."
+            });
+    }
+
+    int inliers = Cv2.CountNonZero(inlierMask);
+
+    Console.WriteLine($"[Alignment] Affine RANSAC Inliers: {inliers}/{matches.Count}");
+
+    if (inliers < 30) // Adjusted threshold to 30 as discussed earlier
+    {
+        return (null,
+            new AlignmentResult
+            {
+                Success = false,
+                InlierCount = inliers,
+                FailureReason = $"Only {inliers} RANSAC inliers."
+            });
+    }
+
+    Mat warped = new();
+    // =========================================================================
+    // USE WARP AFFINE INSTEAD OF WARP PERSPECTIVE
+    // =========================================================================
+    Cv2.WarpAffine(
+        capturedImage,
+        warped,
+        M,
+        new Size(_masterImage.Width, _masterImage.Height),
+        InterpolationFlags.Linear,
+        BorderTypes.Constant,
+        Scalar.All(0));
+
+    Console.WriteLine($"[Alignment] SUCCESS (ORB + Affine)");
+
+    return (warped,
+        new AlignmentResult
+        {
+            Success = true,
+            InlierCount = inliers
+        });
+}
