@@ -1,0 +1,94 @@
+private List<(Point2f master, Point2f captured)> FindOrbMatches(Mat capturedImage)
+{
+    using Mat masterGray = new();
+    using Mat capturedGray = new();
+
+    if (_masterImage.Channels() == 3)
+        Cv2.CvtColor(_masterImage, masterGray, ColorConversionCodes.BGR2GRAY);
+    else
+        _masterImage.CopyTo(masterGray);
+
+    if (capturedImage.Channels() == 3)
+        Cv2.CvtColor(capturedImage, capturedGray, ColorConversionCodes.BGR2GRAY);
+    else
+        capturedImage.CopyTo(capturedGray);
+
+    // =========================================================================
+    // BUILD DYNAMIC MASTER MASK FROM JSON CONFIG TO IGNORE BACKGROUND CABLES
+    // =========================================================================
+    using Mat masterMask = new Mat(masterGray.Size(), MatType.CV_8UC1, Scalar.All(0));
+    if (_profile.AlignmentMask != null && _profile.AlignmentMask.Length == 4)
+    {
+        var maskRect = new Rect(
+            _profile.AlignmentMask[0], 
+            _profile.AlignmentMask[1], 
+            _profile.AlignmentMask[2], 
+            _profile.AlignmentMask[3]);
+        
+        // Clamp rect to image bounds for safety
+        maskRect = maskRect.Intersect(new Rect(0, 0, masterGray.Width, masterGray.Height));
+        Cv2.Rectangle(masterMask, maskRect, Scalar.All(255), -1);
+    }
+    else
+    {
+        // Fallback: If no mask is specified in JSON, use the full image
+        masterMask.SetTo(Scalar.All(255));
+    }
+
+    using var orb = ORB.Create(
+        nFeatures: 4000,
+        scaleFactor: 1.15f,
+        nLevels: 8);
+
+    using Mat masterDescriptors = new Mat();
+    // PASS THE MASK HERE: ORB only extracts features on the valid part area!
+    orb.DetectAndCompute(
+        masterGray,
+        masterMask, // <-- Mask applied here
+        out KeyPoint[] masterKeypoints,
+        masterDescriptors);
+
+    using Mat capturedDescriptors = new Mat();
+    // Captured image is scanned normally to find where the part moved
+    orb.DetectAndCompute(
+        capturedGray,
+        null, 
+        out KeyPoint[] capturedKeypoints,
+        capturedDescriptors);
+
+    if (masterDescriptors.Empty() || capturedDescriptors.Empty())
+        return new List<(Point2f, Point2f)>();
+
+    using var matcher = new BFMatcher(NormTypes.Hamming);
+    DMatch[][] knnMatches = matcher.KnnMatch(
+        masterDescriptors,
+        capturedDescriptors,
+        2);
+
+    List<DMatch> goodMatches = new();
+    foreach (var pair in knnMatches)
+    {
+        if (pair.Length < 2) continue;
+        if (pair[0].Distance < 0.75 * pair[1].Distance)
+        {
+            goodMatches.Add(pair[0]);
+        }
+    }
+
+    Console.WriteLine(
+        $"[Alignment] ORB Features: " +
+        $"Master={masterKeypoints.Length}, " +
+        $"Captured={capturedKeypoints.Length}");
+
+    Console.WriteLine($"[Alignment] ORB Good Matches: {goodMatches.Count}");
+
+    var matches = new List<(Point2f, Point2f)>();
+    foreach (var match in goodMatches)
+    {
+        Point2f masterPt = masterKeypoints[match.QueryIdx].Pt;
+        Point2f capturedPt = capturedKeypoints[match.TrainIdx].Pt;
+        matches.Add((masterPt, capturedPt));
+    }
+
+    return matches;
+}
