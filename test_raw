@@ -1,0 +1,100 @@
+// In AlignmentModule.cs, change the return type of Align to include Mat H:
+public (Mat H, AlignmentResult result) GetAlignmentMatrix(Mat capturedImage)
+{
+    var matches = FindOrbMatches(capturedImage);
+    if (matches.Count < 20) return (null, new AlignmentResult { Success = false, FailureReason = "Not enough matches" });
+
+    Point2f[] masterPts = matches.Select(x => x.Item1).ToArray();
+    Point2f[] capturedPts = matches.Select(x => x.Item2).ToArray();
+
+    using var srcMat = InputArray.Create(capturedPts);
+    using var dstMat = InputArray.Create(masterPts);
+    using Mat inlierMask = new Mat();
+
+    // Keep Homography as you requested
+    Mat H = Cv2.FindHomography(srcMat, dstMat, HomographyMethods.Ransac, 3.0, inlierMask);
+    if (H == null || H.Empty()) return (null, new AlignmentResult { Success = false, FailureReason = "Homography failed" });
+
+    int inliers = Cv2.CountNonZero(inlierMask);
+    if (inliers < 30) return (null, new AlignmentResult { Success = false, FailureReason = $"Only {inliers} inliers" });
+
+    return (H, new AlignmentResult { Success = true, InlierCount = inliers });
+}
+
+
+
+
+// Inside InspectionOrchestrator.Inspect(Mat capturedImage):
+var (H, alignmentResult) = _alignmentModule.GetAlignmentMatrix(capturedImage);
+
+if (!alignmentResult.Success)
+{
+    // Handle alignment failure...
+}
+
+// Invert H so we can map Master zones -> Captured image coordinates
+using Mat H_inv = H.Inv();
+
+// Run detection directly on the RAW captured image using projected zones
+var zoneResults = _detectionEngine.DetectZonesOnRawImage(capturedImage, H_inv, _profile);
+
+
+
+
+
+
+public List<ZoneResult> DetectZonesOnRawImage(Mat rawCapturedImage, Mat H_inv, InspectionProfile profile)
+{
+    var results = new List<ZoneResult>();
+
+    // Preprocess the raw captured image once (CLAHE + Blur)
+    using Mat preprocessed = Preprocessor.Preprocess(rawCapturedImage, profile.Preprocessing);
+
+    foreach (var zone in profile.Zones)
+    {
+        // 1. Get the 4 corners of the zone from the Master profile [x, y, w, h]
+        Point2f[] masterBoxCorners = new Point2f[]
+        {
+            new Point2f(zone.Bbox[0], zone.Bbox[1]),                           // Top-Left
+            new Point2f(zone.Bbox[0] + zone.Bbox[2], zone.Bbox[1]),          // Top-Right
+            new Point2f(zone.Bbox[0] + zone.Bbox[2], zone.Bbox[1] + zone.Bbox[3]), // Bottom-Right
+            new Point2f(zone.Bbox[0], zone.Bbox[1] + zone.Bbox[3])           // Bottom-Left
+        };
+
+        // 2. Project these corners onto the captured image using Inverse Homography!
+        Point2f[] capturedBoxCorners = Cv2.PerspectiveTransform(masterBoxCorners, H_inv);
+
+        // 3. Find the bounding rect of the projected corners on the captured image
+        Rect projectedBbox = Cv2.BoundingRect(capturedBoxCorners);
+
+        // Safety clamp
+        projectedBbox = ClampRect(projectedBbox, preprocessed.Size());
+
+        // 4. Crop cleanly from the raw preprocessed image (Zero interpolation blur!)
+        using Mat crop = new Mat(preprocessed, projectedBbox);
+        using Mat edges = new Mat();
+
+        Cv2.Canny(crop, edges, profile.Preprocessing.CannyLow, profile.Preprocessing.CannyHigh);
+
+        int totalPixels = projectedBbox.Width * projectedBbox.Height;
+        int edgePixels = Cv2.CountNonZero(edges);
+        double edgeDensity = totalPixels > 0 ? (double)edgePixels / totalPixels : 0.0;
+
+        double ratio = zone.Threshold > 0 ? edgeDensity / zone.Threshold : 0.0;
+
+        // Apply Uncertain Band logic...
+        ZoneDecision decision = EvaluateDecision(ratio, profile.UncertainBand);
+
+        results.Add(new ZoneResult
+        {
+            ZoneId = zone.Id,
+            Label = zone.Label,
+            EdgeDensity = Math.Round(edgeDensity, 6),
+            Threshold = zone.Threshold,
+            Ratio = Math.Round(ratio, 4),
+            Decision = decision
+        });
+    }
+
+    return results;
+}
