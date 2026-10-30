@@ -1,0 +1,87 @@
+public class ZoneResult
+{
+    public string ZoneId { get; set; }
+    public string Label { get; set; }
+    public double EdgeDensity { get; set; }
+    public double Threshold { get; set; }
+    public double Ratio { get; set; }
+    public ZoneDecision Decision { get; set; }
+
+    // ADD THIS: Store the dynamically projected box on the captured image
+    public Rect ProjectedBbox { get; set; } 
+}
+
+
+
+
+
+
+
+// Inside DetectZonesOnRawImage loop:
+Point2f[] masterBoxCorners = new Point2f[]
+{
+    new Point2f(zone.Bbox[0], zone.Bbox[1]),
+    new Point2f(zone.Bbox[0] + zone.Bbox[2], zone.Bbox[1]),
+    new Point2f(zone.Bbox[0] + zone.Bbox[2], zone.Bbox[1] + zone.Bbox[3]),
+    new Point2f(zone.Bbox[0], zone.Bbox[1] + zone.Bbox[3])
+};
+
+Point2f[] capturedBoxCorners = Cv2.PerspectiveTransform(masterBoxCorners, H_inv);
+Rect projectedBbox = Cv2.BoundingRect(capturedBoxCorners);
+projectedBbox = ClampRect(projectedBbox, preprocessed.Size());
+
+// ... calculate edge density ...
+
+results.Add(new ZoneResult
+{
+    ZoneId = zone.Id,
+    Label = zone.Label,
+    EdgeDensity = Math.Round(edgeDensity, 6),
+    Threshold = zone.Threshold,
+    Ratio = Math.Round(ratio, 4),
+    Decision = decision,
+    ProjectedBbox = projectedBbox // <-- SAVE IT HERE
+});
+
+
+
+
+
+
+public Mat RenderResults(Mat capturedImage, List<ZoneResult> zoneResults, InspectionProfile profile)
+{
+    Mat rendered = capturedImage.Clone();
+
+    foreach (var result in zoneResults)
+    {
+        // Pick color based on decision (Green = Present, Red = Missing, Orange = Uncertain)
+        Scalar color = result.Decision switch
+        {
+            ZoneDecision.Present => new Scalar(0, 255, 0),     // Green
+            ZoneDecision.Missing => new Scalar(0, 0, 255),     // Red
+            ZoneDecision.Uncertain => new Scalar(0, 165, 255), // Orange
+            _ => new Scalar(255, 255, 255)
+        };
+
+        // =====================================================================
+        // FIX: USE THE DYNAMIC PROJECTED BOX INSTEAD OF STATIC CONFIG `zone.Bbox`
+        // =====================================================================
+        Rect box = result.ProjectedBbox;
+
+        // Draw bounding box on the captured image
+        Cv2.Rectangle(rendered, box, color, 2);
+
+        // Draw label text above the box
+        string text = $"{result.Label} [{result.Decision}]";
+        Cv2.PutText(
+            rendered, 
+            text, 
+            new Point(box.X, Math.Max(15, box.Y - 10)), 
+            HersheyFonts.HersheySimplex, 
+            0.5, 
+            color, 
+            1);
+    }
+
+    return rendered;
+}
