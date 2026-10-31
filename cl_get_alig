@@ -1,0 +1,186 @@
+// =====================================================================
+// Everything happens inside the alignment module.
+// GetAlignmentMatrix returns ONE H (captured -> master).
+// Orchestrator is untouched: H_inv + PerspectiveTransform on master zones.
+//
+// Strategy: global SIFT+MAGSAC  ->  iterative residual passes  ->
+//           ECC pixel-level refinement inside the region of interest.
+// The region of interest = AlignmentMask rect from your profile.
+// SET AlignmentMask TO THE AREA THAT CONTAINS ALL YOUR ZONES (+ margin).
+// H is then optimised where it matters instead of the whole image.
+// =====================================================================
+
+public (Mat H, AlignmentResult result) GetAlignmentMatrix(Mat capturedImage)
+{
+    // ---------- Pass 1: global ----------
+    var matches = FindOrbMatches(capturedImage);
+    if (matches.Count < 20)
+        return (null, new AlignmentResult { Success = false, FailureReason = "Not enough matches" });
+
+    Mat H = EstimateH(matches, out int inliers);
+    if (H == null || H.Empty())
+        return (null, new AlignmentResult { Success = false, FailureReason = "Homography failed" });
+    if (inliers < 20)
+    {
+        H.Dispose();
+        return (null, new AlignmentResult { Success = false, FailureReason = $"Only {inliers} inliers" });
+    }
+
+    Rect roi = GetRoi();
+
+    // ---------- Pass 2: iterative residual correction (up to 3 rounds) ----------
+    for (int iter = 0; iter < 3; iter++)
+    {
+        try
+        {
+            using Mat warped = new Mat();
+            Cv2.WarpPerspective(capturedImage, warped, H, _masterImage.Size(),
+                InterpolationFlags.Linear, BorderTypes.Constant, Scalar.All(0));
+
+            var res = FindOrbMatches(warped);               // master vs warped
+            if (res.Count < 20) break;
+
+            Mat H2 = EstimateH(res, out int in2);           // warped -> master
+            if (H2 == null || H2.Empty() || in2 < 20) { H2?.Dispose(); break; }
+
+            double shift = MeanShiftInRoi(H2, roi);
+            Console.WriteLine($"[Alignment] Residual pass {iter + 1}: shift={shift:F2}px inliers={in2}");
+
+            if (shift > 40) { H2.Dispose(); break; }        // implausible correction, ignore
+
+            Mat combined = (H2 * H).ToMat();
+            H.Dispose();
+            H = combined;
+            inliers = in2;
+            H2.Dispose();
+
+            if (shift < 0.5) break;                         // converged
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Alignment] Residual pass skipped: {ex.Message}");
+            break;
+        }
+    }
+
+    // ---------- Pass 3: ECC pixel-level refinement inside ROI ----------
+    try
+    {
+        Mat Hecc = RefineWithEcc(capturedImage, H, roi);
+        if (Hecc != null)
+        {
+            H.Dispose();
+            H = Hecc;
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Alignment] ECC skipped: {ex.Message}");
+    }
+
+    return (H, new AlignmentResult { Success = true, InlierCount = inliers });
+}
+
+// ---------------------------------------------------------------------
+// Captured -> master homography from the match list (MAGSAC)
+// ---------------------------------------------------------------------
+private Mat EstimateH(List<(Point2f master, Point2f captured)> matches, out int inliers)
+{
+    Point2f[] masterPts = matches.Select(x => x.master).ToArray();
+    Point2f[] capturedPts = matches.Select(x => x.captured).ToArray();
+
+    using var srcMat = InputArray.Create(capturedPts);
+    using var dstMat = InputArray.Create(masterPts);
+    using Mat inlierMask = new Mat();
+
+    Mat H = Cv2.FindHomography(srcMat, dstMat, HomographyMethods.USAC_MAGSAC,
+        3.0, inlierMask, maxIters: 2000, confidence: 0.999);
+
+    inliers = (H == null || H.Empty()) ? 0 : Cv2.CountNonZero(inlierMask);
+    return H;
+}
+
+// ---------------------------------------------------------------------
+// ROI = alignment mask rect, inflated 10%
+// ---------------------------------------------------------------------
+private Rect GetRoi()
+{
+    Rect r = GetMaskRect(_masterImage.Size());
+    int ix = (int)(r.Width * 0.10), iy = (int)(r.Height * 0.10);
+    return new Rect(r.X - ix, r.Y - iy, r.Width + 2 * ix, r.Height + 2 * iy)
+        .Intersect(new Rect(0, 0, _masterImage.Width, _masterImage.Height));
+}
+
+// Average displacement H2 causes on a grid of points inside the ROI
+private static double MeanShiftInRoi(Mat H2, Rect roi)
+{
+    var pts = new List<Point2f>();
+    for (int i = 0; i <= 2; i++)
+        for (int j = 0; j <= 2; j++)
+            pts.Add(new Point2f(roi.X + roi.Width * i / 2f, roi.Y + roi.Height * j / 2f));
+
+    Point2f[] moved = Cv2.PerspectiveTransform(pts.ToArray(), H2);
+    double sum = 0;
+    for (int k = 0; k < pts.Count; k++)
+        sum += Math.Sqrt(Math.Pow(moved[k].X - pts[k].X, 2) + Math.Pow(moved[k].Y - pts[k].Y, 2));
+    return sum / pts.Count;
+}
+
+// ---------------------------------------------------------------------
+// ECC: pixel-accurate refinement, restricted to the ROI.
+// Returns the new total H, or null if refinement is not trustworthy.
+// ---------------------------------------------------------------------
+private Mat RefineWithEcc(Mat capturedImage, Mat H, Rect roi)
+{
+    if (roi.Width < 64 || roi.Height < 64) return null;
+
+    using Mat warped = new Mat();
+    Cv2.WarpPerspective(capturedImage, warped, H, _masterImage.Size(),
+        InterpolationFlags.Linear, BorderTypes.Constant, Scalar.All(0));
+
+    using Mat mGray = PrepareGray(_masterImage);
+    using Mat wGray = PrepareGray(warped);
+    using Mat mCrop = new Mat(mGray, roi);
+    using Mat wCrop = new Mat(wGray, roi);
+
+    // Ignore black border created by the warp
+    using Mat valid = new Mat();
+    Cv2.Threshold(wCrop, valid, 1, 255, ThresholdTypes.Binary);
+    Cv2.Erode(valid, valid, null, iterations: 3);
+
+    // Affine (6 DOF) is stable inside a small region; homography can drift
+    using Mat W = Mat.Eye(2, 3, MatType.CV_32FC1).ToMat();
+    var criteria = new TermCriteria(CriteriaTypes.Eps | CriteriaTypes.Count, 100, 1e-5);
+
+    double rho = Cv2.FindTransformECC(mCrop, wCrop, W, MotionTypes.Affine, criteria, valid, 5);
+    Console.WriteLine($"[Alignment] ECC correlation={rho:F3}");
+    if (rho < 0.3) return null;
+
+    // Sanity: correction must be small
+    float a = W.At<float>(0, 0), b = W.At<float>(0, 1), tx = W.At<float>(0, 2);
+    float c = W.At<float>(1, 0), d = W.At<float>(1, 1), ty = W.At<float>(1, 2);
+    double scale = Math.Sqrt(Math.Abs(a * d - b * c));
+    if (Math.Abs(tx) > 30 || Math.Abs(ty) > 30 || scale < 0.95 || scale > 1.05)
+    {
+        Console.WriteLine($"[Alignment] ECC rejected: t=({tx:F1},{ty:F1}) scale={scale:F3}");
+        return null;
+    }
+
+    // W (crop coords) maps master -> warped.  Convert to full-image coords.
+    // Wc = [a b tx; c d ty; 0 0 1]
+    using Mat Wc = new Mat(3, 3, MatType.CV_64FC1, Scalar.All(0));
+    Wc.Set(0, 0, (double)a); Wc.Set(0, 1, (double)b); Wc.Set(0, 2, (double)tx);
+    Wc.Set(1, 0, (double)c); Wc.Set(1, 1, (double)d); Wc.Set(1, 2, (double)ty);
+    Wc.Set(2, 2, 1.0);
+
+    using Mat To = Mat.Eye(3, 3, MatType.CV_64FC1).ToMat();     // full -> crop
+    To.Set(0, 2, (double)-roi.X); To.Set(1, 2, (double)-roi.Y);
+    using Mat ToInv = Mat.Eye(3, 3, MatType.CV_64FC1).ToMat();  // crop -> full
+    ToInv.Set(0, 2, (double)roi.X); ToInv.Set(1, 2, (double)roi.Y);
+
+    using Mat Wfull = (ToInv * Wc * To).ToMat();                // master -> warped (full coords)
+    using Mat WfullInv = Wfull.Inv().ToMat();                   // warped -> master
+
+    // captured -> warped (H) -> master (WfullInv)
+    return (WfullInv * H).ToMat();
+}
