@@ -1,0 +1,118 @@
+private List<(Point2f master, Point2f captured)> FindOrbMatches(Mat capturedImage)
+{
+    using Mat masterGray = new();
+    using Mat capturedGray = new();
+
+    if (_masterImage.Channels() == 3)
+        Cv2.CvtColor(_masterImage, masterGray, ColorConversionCodes.BGR2GRAY);
+    else
+        _masterImage.CopyTo(masterGray);
+
+    if (capturedImage.Channels() == 3)
+        Cv2.CvtColor(capturedImage, capturedGray, ColorConversionCodes.BGR2GRAY);
+    else
+        capturedImage.CopyTo(capturedGray);
+
+    // =========================================================================
+    // 1. LIGHTING NORMALIZATION (CLAHE + Bilateral Filter)
+    // =========================================================================
+    // Bilateral filter removes metallic micro-grain and specular noise while keeping structural edges sharp
+    using Mat masterFiltered = new Mat();
+    using Mat capturedFiltered = new Mat();
+    Cv2.BilateralFilter(masterGray, masterFiltered, d: 9, sigmaColor: 75, sigmaSpace: 75);
+    Cv2.BilateralFilter(capturedGray, capturedFiltered, d: 9, sigmaColor: 75, sigmaSpace: 75);
+
+    // CLAHE (Contrast Limited Adaptive Histogram Equalization) equalizes shadows and glare
+    using var clahe = Cv2.CreateCLAHE(clipLimit: 2.0, tileGridSize: new Size(8, 8));
+    using Mat masterProcessed = new Mat();
+    using Mat capturedProcessed = new Mat();
+    clahe.Apply(masterFiltered, masterProcessed);
+    clahe.Apply(capturedFiltered, capturedProcessed);
+
+    // =========================================================================
+    // 2. BUILD DYNAMIC MASTER MASK FROM JSON CONFIG
+    // =========================================================================
+    using Mat masterMask = new Mat(masterProcessed.Size(), MatType.CV_8UC1, Scalar.All(0));
+    if (_profile.AlignmentMask != null && _profile.AlignmentMask.Length == 4)
+    {
+        var maskRect = new Rect(
+            _profile.AlignmentMask[0], 
+            _profile.AlignmentMask[1], 
+            _profile.AlignmentMask[2], 
+            _profile.AlignmentMask[3]);
+
+        maskRect = maskRect.Intersect(new Rect(0, 0, masterProcessed.Width, masterProcessed.Height));
+        Cv2.Rectangle(masterMask, maskRect, Scalar.All(255), -1);
+    }
+    else
+    {
+        masterMask.SetTo(Scalar.All(255));
+    }
+
+    using var orb = ORB.Create(
+        nFeatures: 4000,
+        scaleFactor: 1.15f,
+        nLevels: 8);
+
+    using Mat masterDescriptors = new Mat();
+    orb.DetectAndCompute(
+        masterProcessed, // Use processed image
+        masterMask, 
+        out KeyPoint[] masterKeypoints,
+        masterDescriptors);
+
+    using Mat capturedDescriptors = new Mat();
+    orb.DetectAndCompute(
+        capturedProcessed, // Use processed image
+        null, 
+        out KeyPoint[] capturedKeypoints,
+        capturedDescriptors);
+
+    if (masterDescriptors.Empty() || capturedDescriptors.Empty() || masterKeypoints.Length == 0 || capturedKeypoints.Length == 0)
+        return new List<(Point2f, Point2f)>();
+
+    // =========================================================================
+    // 3. SUBPIXEL REFINEMENT
+    // =========================================================================
+    Point2f[] masterPtsRaw = masterKeypoints.Select(k => k.Pt).ToArray();
+    Point2f[] capturedPtsRaw = capturedKeypoints.Select(k => k.Pt).ToArray();
+
+    TermCriteria criteria = new TermCriteria(CriteriaTypes.Eps | CriteriaTypes.Count, 30, 0.001);
+    Size winSize = new Size(5, 5);
+    Size zeroZone = new Size(-1, -1);
+
+    Cv2.CornerSubPix(masterProcessed, masterPtsRaw, winSize, zeroZone, criteria);
+    Cv2.CornerSubPix(capturedProcessed, capturedPtsRaw, winSize, zeroZone, criteria);
+
+    // =========================================================================
+    // 4. MATCHING WITH STRICTER RATIO TEST (0.65)
+    // =========================================================================
+    using var matcher = new BFMatcher(NormTypes.Hamming);
+    DMatch[][] knnMatches = matcher.KnnMatch(
+        masterDescriptors,
+        capturedDescriptors,
+        2);
+
+    List<DMatch> goodMatches = new();
+    foreach (var pair in knnMatches)
+    {
+        if (pair.Length < 2) continue;
+        if (pair[0].Distance < 0.65 * pair[1].Distance)
+        {
+            goodMatches.Add(pair[0]);
+        }
+    }
+
+    Console.WriteLine($"[Alignment] ORB Features: Master={masterKeypoints.Length}, Captured={capturedKeypoints.Length}");
+    Console.WriteLine($"[Alignment] ORB Good Matches: {goodMatches.Count}");
+
+    var matches = new List<(Point2f, Point2f)>();
+    foreach (var match in goodMatches)
+    {
+        Point2f masterPt = masterPtsRaw[match.QueryIdx];
+        Point2f capturedPt = capturedPtsRaw[match.TrainIdx];
+        matches.Add((masterPt, capturedPt));
+    }
+
+    return matches;
+}
