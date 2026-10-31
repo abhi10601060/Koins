@@ -1,0 +1,169 @@
+// ---- Add these fields to your class ----
+private SIFT? _sift;
+private KeyPoint[]? _masterKeypoints;
+private Mat? _masterDescriptors;
+private Mat? _cachedMasterRef;          // detects when master image changes
+private string _cachedMaskKey = "";     // detects when alignment mask changes
+
+// Tunables
+private const bool UseClahe = false;            // try true only if lighting varies a lot
+private const float RatioThreshold = 0.75f;
+private const int MinGoodMatches = 15;
+private const int MinInliers = 15;
+private const double MinInlierRatio = 0.40;
+private const double RansacReprojThresh = 3.0;
+private const double MinScale = 0.85, MaxScale = 1.15;
+private const double MaxRotationDeg = 30.0;     // set to your expected max rotation
+private const double MinHullCoverage = 0.15;    // inlier hull area / mask area
+
+private Mat PrepareGray(Mat src)
+{
+    var gray = new Mat();
+    if (src.Channels() == 3)
+        Cv2.CvtColor(src, gray, ColorConversionCodes.BGR2GRAY);
+    else if (src.Channels() == 4)
+        Cv2.CvtColor(src, gray, ColorConversionCodes.BGRA2GRAY);
+    else
+        src.CopyTo(gray);
+
+    if (UseClahe)
+    {
+        using var clahe = Cv2.CreateCLAHE(clipLimit: 1.5, tileGridSize: new Size(8, 8));
+        var eq = new Mat();
+        clahe.Apply(gray, eq);
+        gray.Dispose();
+        return eq;
+    }
+    return gray;
+}
+
+private Rect GetMaskRect(Size imgSize)
+{
+    var full = new Rect(0, 0, imgSize.Width, imgSize.Height);
+    if (_profile.AlignmentMask != null && _profile.AlignmentMask.Length == 4)
+    {
+        var r = new Rect(
+            _profile.AlignmentMask[0],
+            _profile.AlignmentMask[1],
+            _profile.AlignmentMask[2],
+            _profile.AlignmentMask[3]).Intersect(full);
+        if (r.Width > 0 && r.Height > 0) return r;
+    }
+    return full;
+}
+
+// Master features are computed once and reused for every captured image
+private void EnsureMasterFeatures()
+{
+    string maskKey = _profile.AlignmentMask != null ? string.Join(",", _profile.AlignmentMask) : "full";
+
+    if (_masterDescriptors != null &&
+        ReferenceEquals(_cachedMasterRef, _masterImage) &&
+        _cachedMaskKey == maskKey)
+        return;
+
+    _masterDescriptors?.Dispose();
+    _masterDescriptors = new Mat();
+    _sift ??= SIFT.Create(nFeatures: 3000, contrastThreshold: 0.02);
+
+    using Mat masterGray = PrepareGray(_masterImage);
+    using Mat masterMask = new Mat(masterGray.Size(), MatType.CV_8UC1, Scalar.All(0));
+    Cv2.Rectangle(masterMask, GetMaskRect(masterGray.Size()), Scalar.All(255), -1);
+
+    _sift.DetectAndCompute(masterGray, masterMask, out var kps, _masterDescriptors);
+    _masterKeypoints = kps;
+    _cachedMasterRef = _masterImage;
+    _cachedMaskKey = maskKey;
+}
+
+private List<(Point2f master, Point2f captured)> FindOrbMatches(Mat capturedImage)
+{
+    var empty = new List<(Point2f, Point2f)>();
+
+    EnsureMasterFeatures();
+    if (_masterDescriptors == null || _masterDescriptors.Empty() ||
+        _masterKeypoints == null || _masterKeypoints.Length == 0)
+        return empty;
+
+    // 1. Detect features on captured image
+    using Mat capturedGray = PrepareGray(capturedImage);
+    using Mat capturedDescriptors = new Mat();
+    _sift!.DetectAndCompute(capturedGray, null, out KeyPoint[] capturedKeypoints, capturedDescriptors);
+
+    if (capturedDescriptors.Empty() || capturedKeypoints.Length == 0)
+        return empty;
+
+    // 2. Matching: ratio test + mutual (cross) check
+    using var matcher = new BFMatcher(NormTypes.L2);
+    DMatch[][] knn = matcher.KnnMatch(_masterDescriptors, capturedDescriptors, 2);
+    DMatch[] reverse = matcher.Match(capturedDescriptors, _masterDescriptors);
+
+    var goodMatches = new List<DMatch>();
+    foreach (var pair in knn)
+    {
+        if (pair.Length < 2) continue;
+        if (pair[0].Distance >= RatioThreshold * pair[1].Distance) continue;
+        if (reverse[pair[0].TrainIdx].TrainIdx != pair[0].QueryIdx) continue; // mutual check
+        goodMatches.Add(pair[0]);
+    }
+
+    Console.WriteLine($"[Alignment] SIFT Features: Master={_masterKeypoints.Length}, Captured={capturedKeypoints.Length}");
+    Console.WriteLine($"[Alignment] Good Matches (ratio+mutual): {goodMatches.Count}");
+
+    if (goodMatches.Count < MinGoodMatches)
+        return empty;
+
+    // 3. Geometric verification (MAGSAC) - keeps only consistent matches
+    var src = goodMatches.Select(m => new Point2d(_masterKeypoints[m.QueryIdx].Pt.X, _masterKeypoints[m.QueryIdx].Pt.Y)).ToArray();
+    var dst = goodMatches.Select(m => new Point2d(capturedKeypoints[m.TrainIdx].Pt.X, capturedKeypoints[m.TrainIdx].Pt.Y)).ToArray();
+
+    using Mat inlierMask = new Mat();
+    // If USAC_MAGSAC is missing in your OpenCvSharp version, use HomographyMethods.Ransac
+    using Mat H = Cv2.FindHomography(src, dst, HomographyMethods.USAC_MAGSAC, RansacReprojThresh, inlierMask);
+    if (H.Empty())
+        return empty;
+
+    var idx = inlierMask.GetGenericIndexer<byte>();
+    var inlierIdx = new List<int>();
+    for (int i = 0; i < goodMatches.Count; i++)
+        if (idx[i, 0] != 0) inlierIdx.Add(i);
+
+    double ratio = (double)inlierIdx.Count / goodMatches.Count;
+    Console.WriteLine($"[Alignment] Inliers: {inlierIdx.Count} ({ratio:P0})");
+
+    if (inlierIdx.Count < MinInliers || ratio < MinInlierRatio)
+        return empty;
+
+    // 4. Sanity checks on the transform
+    double h00 = H.At<double>(0, 0), h01 = H.At<double>(0, 1);
+    double h10 = H.At<double>(1, 0), h11 = H.At<double>(1, 1);
+    double sx = Math.Sqrt(h00 * h00 + h10 * h10);
+    double sy = Math.Sqrt(h01 * h01 + h11 * h11);
+    double rotDeg = Math.Atan2(h10, h00) * 180.0 / Math.PI;
+
+    if (sx < MinScale || sx > MaxScale || sy < MinScale || sy > MaxScale ||
+        Math.Abs(rotDeg) > MaxRotationDeg)
+    {
+        Console.WriteLine($"[Alignment] Rejected: scale=({sx:F2},{sy:F2}) rot={rotDeg:F1}deg");
+        return empty;
+    }
+
+    // 5. Spatial coverage: inliers must not be clustered in one corner
+    var hull = Cv2.ConvexHull(inlierIdx.Select(i => new Point2f((float)src[i].X, (float)src[i].Y)).ToArray());
+    double hullArea = Cv2.ContourArea(hull);
+    var maskRect = GetMaskRect(_masterImage.Size());
+    double coverage = hullArea / (maskRect.Width * (double)maskRect.Height);
+    Console.WriteLine($"[Alignment] Coverage: {coverage:P0}");
+
+    if (coverage < MinHullCoverage)
+        return empty;
+
+    // 6. Return only verified matches (same output type as before)
+    var matches = new List<(Point2f, Point2f)>(inlierIdx.Count);
+    foreach (int i in inlierIdx)
+    {
+        var m = goodMatches[i];
+        matches.Add((_masterKeypoints[m.QueryIdx].Pt, capturedKeypoints[m.TrainIdx].Pt));
+    }
+    return matches;
+}
